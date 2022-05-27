@@ -15,6 +15,7 @@ import argparse
 import h5py
 import json
 import torch.nn.init as init
+import shutil
 
 from config import  *
 from sys_utils import *
@@ -212,8 +213,8 @@ class AONet:
 
         print("Starting training...")
 
-        max_val_fscore = 0
-        max_val_fscore_epoch = 0
+        max_val_fscore = 0.
+        max_val_fscore_epoch = 0.
         train_keys = self.train_keys[:]
 
         lr = self.hps.lr[0]
@@ -230,7 +231,7 @@ class AONet:
                 seq = dataset['features'][...]
                 seq = torch.from_numpy(seq).unsqueeze(0)
                 target = dataset['gtscore'][...]
-                target = torch.from_numpy(target).unsqueeze(0)
+                target = torch.from_numpy(target).unsqueeze(0).float()
 
                 # Normalize frame scores
                 target -= target.min()
@@ -242,6 +243,11 @@ class AONet:
                 seq_len = seq.shape[1]
                 y, _ = self.model(seq,seq_len)
                 loss_att = 0
+
+                # print('PREDICTION-----------------------------')
+                # print(y)
+                # print(target)
+                # print('---------------------------------------')
 
                 loss = criterion(y, target)
                 # loss2 = y.sum()/seq_len
@@ -279,24 +285,33 @@ class AONet:
     def eval(self, keys, results_filename=None):
 
         self.model.eval()
+        # Summary contiene coppie key-value (videoname, array)
+        # dove l'array è la summarization del video (per ogni frame)
+        # da in output un valore in [0, 1] che indica quanto è importante
+        # il frame. 
         summary = {}
         att_vecs = {}
         with torch.no_grad():
+            # "keys" è un vettore contenente i filename dei video  
+            # su cui viene testato l'algoritmo.
             for i, key in enumerate(keys):
                 data = self.get_data(key)
-                # seq = self.dataset[key]['features'][...]
                 seq = data['features'][...]
                 seq = torch.from_numpy(seq).unsqueeze(0)
-
                 if self.hps.use_cuda:
                     seq = seq.float().cuda()
 
                 y, att_vec = self.model(seq, seq.shape[1])
+                                
                 summary[key] = y[0].detach().cpu().numpy()
                 att_vecs[key] = att_vec.detach().cpu().numpy()
 
-        f_score, video_scores = self.eval_summary(summary, keys, metric=self.dataset_name,
-                    results_filename=results_filename, att_vecs=att_vecs)
+        f_score, video_scores = self.eval_summary(
+                                    summary, 
+                                    keys, 
+                                    metric=self.dataset_name,
+                                    results_filename=results_filename, 
+                                    att_vecs=att_vecs)
 
         return f_score, video_scores
 
@@ -320,11 +335,24 @@ class AONet:
             cps = d['change_points'][...]
             num_frames = d['n_frames'][()]
             nfps = d['n_frame_per_seg'][...].tolist()
+            # SUPER DUPER CHE CAZZO HO SCRIPTT
+            # nfps = [ 15 for _ in nfps ]
             positions = d['picks'][...]
             user_summary = d['user_summary'][...]
 
             machine_summary = generate_summary(probs, cps, num_frames, nfps, positions)
+            
+            # print('@' * 70)
+            # print(f'nframes: {num_frames}')
+            # print('nfps', np.array(nfps).shape)
+            # print('positions shape', positions.shape)
+            # print('cps shape', cps.shape)
+            # print('probs shape', probs.shape)
+            # print('machine summary shape', machine_summary.shape)
+            # print('user summary shape', user_summary.shape)
+            # print('@' * 70)
             fm, _, _ = evaluate_summary(machine_summary, user_summary, eval_metric)
+
             fms.append(fm)
 
             # Reporting & logging
@@ -394,8 +422,17 @@ def train(hps):
     os.makedirs(os.path.join(hps.output_dir, 'splits'), exist_ok=True)
     os.makedirs(os.path.join(hps.output_dir, 'code'), exist_ok=True)
     os.makedirs(os.path.join(hps.output_dir, 'models'), exist_ok=True)
-    os.system('cp -f splits/*.json  ' + hps.output_dir + '/splits/')
-    os.system('cp *.py ' + hps.output_dir + '/code/')
+
+    for splitfile in os.listdir('splits'):
+        if '.json' not in splitfile: continue
+        src = os.path.join('splits', splitfile)
+        dst = os.path.join(hps.output_dir, 'splits/')
+        shutil.copy(src, dst)
+
+    # os.system('cp -f splits/*.json  ' + hps.output_dir + '/splits/')
+    # os.system('cp *.py ' + hps.output_dir + '/code/')
+
+
 
     # Create a file to collect results from all splits
     f = open(hps.output_dir + '/results.txt', 'wt')
@@ -434,8 +471,15 @@ def train(hps):
             log_file = os.path.join(hps.output_dir, 'models', log_dir) + '_' + str(fscore) + '.tar.pth'
 
             os.makedirs(os.path.join(hps.output_dir, 'models', ), exist_ok=True)
-            os.system('mv ' + hps.output_dir + '/models_temp/' + log_dir + '/' + str(fscore_epoch) + '_*.pth.tar ' + log_file)
-            os.system('rm -rf ' + hps.output_dir + '/models_temp/' + log_dir)
+
+
+            tempmodeldir = os.path.join(hps.output_dir, 'models_temp')
+            tempmodeldir = os.path.join(tempmodeldir, log_dir)
+            for modelfile in os.listdir(tempmodeldir):
+                src = os.path.join(tempmodeldir, modelfile)
+                shutil.move(src, log_file)
+
+            shutil.rmtree(hps.output_dir + '/models_temp/' + log_dir)
 
             print("Split: {0:}   Best F-score: {1:0.5f}   Model: {2:}".format(split_filename, fscore, log_file))
 
@@ -448,7 +492,7 @@ def train(hps):
 
 
 if __name__ == "__main__":
-    print_pkg_versions()
+    #print_pkg_versions()
 
     parser = argparse.ArgumentParser("PyTorch implementation of paper \"Summarizing Videos with Attention\"")
     parser.add_argument('-r', '--root', type=str, default='', help="Project root directory")
